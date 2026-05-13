@@ -4111,6 +4111,7 @@ public:
   sp_head *make_sp_head(THD *thd, const sp_name *name, const Sp_handler *sph,
                         enum_sp_aggregate_type agg_type);
   sp_head *make_sp_head_no_recursive(THD *thd, const sp_name *name,
+                                     const LEX_USER *definer,
                                      const Sp_handler *sph,
                                      enum_sp_aggregate_type agg_type);
   bool sp_body_finalize_routine(THD *);
@@ -4151,7 +4152,7 @@ public:
   bool direct_call(THD *thd, const Qualified_ident *ident, List<Item> *args);
 
   bool assoc_assign_start(THD *thd, Qualified_ident *ident);
-  const sp_type_def *find_type_def(const LEX_CSTRING &name) const;
+  const sp_type_def *find_type_def(const Lex_ident_sys_st& name) const;
   sp_variable *find_variable(const LEX_CSTRING *name,
                              sp_pcontext **ctx,
                              const Sp_rcontext_handler **rh) const;
@@ -5277,19 +5278,34 @@ public:
                                 Spvar_definition *value);
   bool declare_type_ref_cursor(THD *thd,
                                const Lex_ident_sys_st &type_name,
-                               const Lex_ident_sys_st &return_type_name,
                                const Qualified_column_ident *rowtype,
                                const Qualified_column_ident *vartype,
                                const Lex_ident_cli_st &syntax_error_token);
+  bool sp_package_spec_check_cyclic_dependency(THD *thd,
+                                               const Lex_ident_sys_st &db,
+                                               const Lex_ident_sys_st &name)
+                                                                       const;
+  bool declare_type_ref_cursor_return_typedef(THD *thd,
+                               const Lex_ident_sys_st &type_name,
+                               const Lex_ident_sys_st &db/*can be null ident*/,
+                               const Lex_ident_sys_st &package,
+                               const Lex_ident_sys_st &type);
   bool set_field_type_typedef(Lex_field_type_st *type,
-                              const LEX_CSTRING &name,
+                              const Lex_ident_sys_st &name,
                               const Lex_length_and_dec_st &attr,
                               const Lex_column_charset_collation_attrs_st &coll,
                               bool *is_typedef);
   bool set_field_type_udt_or_typedef(Lex_field_type_st *type,
-                             const LEX_CSTRING &name,
+                             const Lex_ident_sys_st &name,
                              const Lex_length_and_dec_st &attr,
                              const Lex_column_charset_collation_attrs_st &coll);
+  bool set_field_type_typedef_package_spec(Lex_field_type_st *res,
+                              const Lex_ident_sys_st &package,
+                              const Lex_ident_sys_st &type);
+  bool set_field_type_typedef_package_spec(Lex_field_type_st *res,
+                              const Lex_ident_sys_st &db,
+                              const Lex_ident_sys_st &package,
+                              const Lex_ident_sys_st &type);
 
   bool map_data_type(const Lex_ident_sys_st &schema,
                      Lex_field_type_st *type) const;
@@ -5344,6 +5360,11 @@ public:
   }
 
   virtual sp_lex_cursor* get_lex_for_cursor()
+  {
+    return nullptr;
+  }
+
+  virtual const LEX *prev_nested_db_load_routine_lex() const
   {
     return nullptr;
   }
@@ -5529,6 +5550,24 @@ struct st_lex_local: public LEX, public Sql_alloc
     the method LEX::add_placeholder()
   */
   List<Item_param>::iterator param_values_it;
+};
+
+
+class sp_lex_db_load_routine: public LEX
+{
+  const LEX *m_prev_lex;
+public:
+  sp_lex_db_load_routine(const LEX *prev_lex)
+   :m_prev_lex(prev_lex)
+  {
+    current_select= nullptr;
+  }
+  ~sp_lex_db_load_routine() override
+  { }
+  const LEX *prev_nested_db_load_routine_lex() const override
+  {
+    return m_prev_lex;
+  }
 };
 
 

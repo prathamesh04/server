@@ -979,7 +979,8 @@ Sp_handler::db_load_routine(THD *thd, const Database_qualified_name *name,
                             sp_package *parent,
                             Stored_program_creation_ctx *creation_ctx) const
 {
-  LEX *old_lex= thd->lex, newlex;
+  LEX *old_lex= thd->lex;
+  sp_lex_db_load_routine newlex(old_lex);
   String defstr;
   char saved_cur_db_buf[SAFE_NAME_LEN+1];
   LEX_STRING saved_cur_db= { saved_cur_db_buf, sizeof(saved_cur_db_buf) };
@@ -989,7 +990,6 @@ Sp_handler::db_load_routine(THD *thd, const Database_qualified_name *name,
   int ret= 0;
 
   thd->lex= &newlex;
-  newlex.current_select= NULL;
 
   defstr.set_charset(creation_ctx->get_client_cs());
   defstr.set_thread_specific();
@@ -2527,6 +2527,43 @@ Sp_handler::sp_cache_routine_reentrant(THD *thd,
 }
 
 
+/*
+  Find and cache a routine in a parser safe mode and suppress all errors.
+*/
+int
+Sp_handler::sp_cache_routine_reentrant_suppress_errors(THD *thd,
+                                       const Database_qualified_name *name,
+                                       sp_head **sp) const
+{
+  Dummy_error_handler err_handler;
+  thd->push_internal_handler(&err_handler);
+  int ret= sp_cache_routine_reentrant(thd, name, sp);
+  thd->pop_internal_handler();
+  return ret;
+}
+
+
+/*
+  Find and cache a PACKAGE spec in a parser-safe reentrant mode.
+  @param db      - The database name
+  @param package - The package name
+  @retval        - A null ptr if some error happened.
+                   Or a pointer to the PACKAGE spec.
+*/
+sp_package *Sp_handler::find_package_spec(THD *thd,
+                                          const Lex_ident_db &db,
+                                          const LEX_CSTRING &package)
+{
+  DBUG_ASSERT(!thd->is_fatal_error);
+  sp_head *sp= nullptr;
+  Database_qualified_name tmp(db, package);
+  bool ret= sp_handler_package_spec.
+              sp_cache_routine_reentrant_suppress_errors(thd, &tmp, &sp);
+  sp_package *spec= (!ret && sp) ? sp->get_package() : nullptr;
+  return spec;
+}
+
+
 /**
   Check if a routine has a declaration in the CREATE PACKAGE statement,
   by looking up in thd->sp_package_spec_cache, and by loading from mysql.proc
@@ -2560,15 +2597,7 @@ is_package_public_routine(THD *thd,
                           const LEX_CSTRING &routine,
                           enum_sp_type type)
 {
-  sp_head *sp= NULL;
-  Database_qualified_name tmp(db, package);
-
-  Dummy_error_handler err_handler;
-  thd->push_internal_handler(&err_handler);
-  bool ret= sp_handler_package_spec.sp_cache_routine_reentrant(thd, &tmp, &sp);
-  thd->pop_internal_handler();
-
-  sp_package *spec= (!ret && sp) ? sp->get_package() : NULL;
+  sp_package *spec= Sp_handler::find_package_spec(thd, db, package);
   return spec && spec->m_routine_declarations.find(routine, type);
 }
 
@@ -2994,8 +3023,22 @@ int Sp_handler::sp_cache_routine(THD *thd, const Database_qualified_name *name,
         Any error when loading an existing routine is either some problem
         with the mysql.proc table, or a parse error because the contents
         has been tampered with (in which case we clear that error).
+        Other scenarios when we want to preserve the original error
+        instead of ER_SP_PROC_TABLE_CORRUPT, for better readability:
+        - A routine uses a TYPE from a PACKAGE specification
+          but does not have EXECUTE privilege on the PACKAGE specification.
+          Let's preserve the ER_PROCACCESS_DENIED_ERROR error,
+        - Packages use types in a long cycle (MDEV-40597):
+          * Package pkg1499 uses a type from pkg1500
+          * Package pkg1498 uses a type from pkg1499
+          * Package pkg1497 uses a type from pkg1488
+          and so on. This can cause a thread stack overrun.
+          Let's preserve the ER_STACK_OVERRUN_NEED_MORE error.
       */
-      if (ret == SP_PARSE_ERROR)
+      if (ret == SP_PARSE_ERROR &&
+          (!thd->is_error() ||
+           (thd->get_stmt_da()->sql_errno() != ER_PROCACCESS_DENIED_ERROR &&
+            thd->get_stmt_da()->sql_errno() != ER_STACK_OVERRUN_NEED_MORE)))
         thd->clear_error();
       /*
         If we cleared the parse error, or when db_find_routine() flagged
