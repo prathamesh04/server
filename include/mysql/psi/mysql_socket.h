@@ -118,12 +118,17 @@ mysql_socket_invalid()
   return mysql_socket;
 }
 
+#ifdef HAVE_PSI_SOCKET_INTERFACE
 /**
   Set socket descriptor and address.
-  @param socket nstrumented socket
+
+  TODO: remove the #ifdef when doxygen is able to compile this with
+   the else branch.
+  @param socket instrumented socket
   @param addr unformatted socket address
   @param addr_len length of socket address
 */
+#endif
 
 static inline void
 mysql_socket_set_address(
@@ -144,10 +149,12 @@ mysql_socket_set_address(
 #endif
 }
 
+#ifdef HAVE_PSI_SOCKET_INTERFACE
 /**
   Set socket descriptor and address.
   @param socket instrumented socket
 */
+#endif
 static inline void
 mysql_socket_set_thread_owner(
 #ifdef HAVE_PSI_SOCKET_INTERFACE
@@ -612,7 +619,7 @@ inline_mysql_socket_fd
   mysql_socket.m_psi= PSI_SOCKET_CALL(init_socket)
     (key, (const my_socket*)&mysql_socket.fd, NULL, 0);
 #endif
-  /**
+  /*
     Currently systemd socket activation is the user of this
     function. Its API (man sd_listen_fds) says FD_CLOSE_EXEC
     is already called. If there becomes another user, we

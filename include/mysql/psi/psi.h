@@ -104,7 +104,6 @@ struct sql_digest_storage;
   Performance schema instrumentation interface.
 
   @defgroup Instrumentation_interface Instrumentation Interface
-  @ingroup Performance_schema
   @{
 */
 
@@ -2910,31 +2909,6 @@ struct PSI_metadata_locker_state_v2
   @typedef PSI
   The instrumentation interface for the current version.
   @sa PSI_CURRENT_VERSION
-*/
-
-/**
-  @typedef PSI_mutex_info
-  The mutex information structure for the current version.
-*/
-
-/**
-  @typedef PSI_rwlock_info
-  The rwlock information structure for the current version.
-*/
-
-/**
-  @typedef PSI_cond_info
-  The cond information structure for the current version.
-*/
-
-/**
-  @typedef PSI_thread_info
-  The thread information structure for the current version.
-*/
-
-/**
-  @typedef PSI_file_info
-  The file information structure for the current version.
 */
 
 /* Export the required version */
