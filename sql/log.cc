@@ -12033,7 +12033,7 @@ err1:
   seqno stays in lockstep because every node applies in the same total order).
   The domain of that stream depends on the mode:
     - wsrep_gtid_mode=ON : wsrep_gtid_domain_id (cluster writes are re-tagged
-      to it, see [wsrep_mysqld.cc:2983]); this is the domain in the checkpoint.
+      to it); this is the domain in the checkpoint.
     - wsrep_gtid_mode=OFF: gtid_domain_id (cluster writes keep the node's
       configured domain, no re-tag).
   In both modes the committed cluster seqno is the SE checkpoint seqno, so we

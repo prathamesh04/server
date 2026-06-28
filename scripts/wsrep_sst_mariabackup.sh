@@ -1462,8 +1462,8 @@ else # joiner
             # that an old joiner keeps working and a new joiner can identify
             # exactly which file was sent. That file, however, only carries a
             # Gtid_list, and its position can be ahead of the engine snapshot
-            # (BACKUP STAGE BLOCK_COMMIT blocks the engine commit but not the
-            # binary log write). With gtid_strict_mode=ON that ahead position
+            # (BACKUP STAGE BLOCK_COMMIT does not pause commits if mariabackup
+            # is used for SST). With gtid_strict_mode=ON that ahead position
             # makes the joiner raise error 1950 when it re-binlogs transactions
             # during IST, and keeping the file could also collide with the
             # joiner's own binary log numbering.
@@ -1489,14 +1489,14 @@ else # joiner
             if [ -n "$binlogs" ]; then
                 wsrep_log_info "Removing received binary log(s) so the joiner" \
                                "starts a fresh binary log seeded from the" \
-                               "storage-engine checkpoint (MDEV-38147)"
+                               "storage-engine checkpoint"
                 for bin_file in $binlogs; do
                     rm -f "$DATA/$bin_file"
                 done
             else
                 wsrep_log_info "No binary log received from donor; the joiner" \
                                "will start a fresh binary log seeded from the" \
-                               "storage-engine checkpoint (MDEV-38147)"
+                               "storage-engine checkpoint"
             fi
             cd "$OLD_PWD"
         fi
