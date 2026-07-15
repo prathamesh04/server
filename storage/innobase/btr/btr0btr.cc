@@ -1288,6 +1288,272 @@ void btr_write_autoinc(trx_t *trx, dict_index_t *index, uint64_t autoinc,
   mtr.commit();
 }
 
+/** A buffer-pool-independent pool of scratch buf_block_t objects.
+
+Such pool is designed to be used instead of the global buffer pool
+for the page-reorganization operations done by btr_page_reorganize()
+and page_zip_reorganize(), where a scratch block is required to
+hold a temporary, pre-rebuild copy of the page being reorganized.
+
+Using this pool removes the need of obtaining the global buf_pool.mutex
+in such functions, avoiding any related delay while holding at least the
+page X-latch.
+This is traded however with some on-demand calls to aligned_malloc(),
+whose number is bounded by the MAX_SLABS parameter.
+
+Allocation is lazy and organized in slabs, each containing BLOCKS_PER_SLAB
+blocks.
+The first slab is eagerly allocated upon pool opening.
+Slabs are stored in the slabs array.
+The n_slabs counter determines how many entries of the slabs array
+were already allocated.
+The pool never shrinks during usage.
+Each block in a slab is wrapped in a node, which contains the block
+and a pointer to the next-free node in a singly-linked list fashion.
+The head of the singly-linked list is the top of the free stack.
+
+When there is no free scratch block, a slab is allocated if possible,
+otherwise MAX_SLABS slabs are already allocated and the caller waits
+for a block to be released.
+This wait has two properties: first, it is intended to be rare,
+since MAX_SLABS * BLOCKS_PER_SLAB is designed to cover reasonable amount
+of concurrent page-reorganizing threads, and second, it is bounded to
+a rather short operation, that is reorganizing a page.
+There is at least one caveat which might prolong the wait length:
+lock_sys.latch contention, which might delay lock_move_reorganize_page().
+The current setting of BLOCKS_PER_SLAB and MAX_SLABS should be generous
+enough, but if this ever becomes a bottleneck, it could be suggested
+to add user-facing knobs to control the size of this scratch pool. */
+class btr_scratch_pool_t
+{
+  /** Number of scratch blocks per allocated slab.
+  At default 16KiB page size: ~1MiB per slab.
+  Worst case 64KiB page size: ~4MiB per slab. */
+  static constexpr size_t BLOCKS_PER_SLAB= 64;
+  static_assert(BLOCKS_PER_SLAB > 0);
+
+  /** Maximum number of slabs.
+  At default 16KiB page size: ~16MiB max.
+  Worst case 64KiB page size: ~64MiB max.
+  MAX_SLABS * BLOCKS_PER_SLAB currently 1024 determines the absolute
+  maximum number of concurrent reorganizations. */
+  static constexpr size_t MAX_SLABS= 16;
+  static_assert(MAX_SLABS > 0);
+
+  /** Block wrapped with intrusive free-list linkage.
+  Since buf_block_t::modify_clock is untouched by scratch block
+  users, it is used to piggyback the pointer to the next
+  free block, in the free stack, without needing an extra member. */
+  struct node_t
+  {
+    /** Raw storage to bypass memset() in buf_page_t constructor */
+    alignas(buf_block_t) byte raw_block[sizeof(buf_block_t)];
+
+    /** Get the pointer to the block */
+    inline buf_block_t* get_block() noexcept
+    {
+      return reinterpret_cast<buf_block_t*>(raw_block);
+    }
+
+    static_assert(sizeof(node_t*) <= sizeof(buf_block_t::modify_clock),
+      "Not enough space to store next_free in buf_block_t::modify_clock");
+
+    /** Get the pointer to the next free block. */
+    inline node_t* get_next_free() noexcept
+    {
+      node_t* next_free;
+      memcpy(&next_free, &(get_block()->modify_clock), sizeof(node_t*));
+      return next_free;
+    }
+
+    /** Store the pointer to the next free block */
+    inline void store_next_free(node_t* next_free) noexcept
+    {
+      memcpy(&(get_block()->modify_clock), &next_free, sizeof(node_t*));
+    }
+  };
+
+  /** Slab of BLOCKS_PER_SLAB nodes. */
+  struct slab_t
+  {
+    node_t nodes[BLOCKS_PER_SLAB];
+  };
+
+  /** Mutex protecting nodes free stack and slabs allocation */
+  mysql_mutex_t mutex;
+  /** Signaled by put() whenever a block is returned.
+  Protected by mutex. */
+  pthread_cond_t block_freed;
+  /** Number of allocated slabs. Protected by mutex. */
+  size_t n_slabs;
+  /** Singly-linked stack of unused nodes. Protected by mutex. */
+  node_t *free;
+
+  /** The array of slabs, to be lazily allocated. Protected by mutex. */
+  slab_t slabs[MAX_SLABS];
+
+  /** Number of blocks currently handed out to callers, that is obtained
+   by get() and not yet returned by put(). Protected by mutex. Debug only. */
+  ut_d(size_t n_active);
+
+  /** Allocate one more slab and push its nodes onto the free stack,
+  unless MAX_SLABS was already reached.
+  @tparam must_own_mutex whether the caller must own mutex.
+  @return whether a slab was allocated. */
+  template<bool must_own_mutex= true>
+  bool add_slab() noexcept
+  {
+    if constexpr (must_own_mutex)
+      mysql_mutex_assert_owner(&mutex);
+
+    if (UNIV_UNLIKELY(n_slabs >= MAX_SLABS))
+      return false;
+
+    byte* frames= static_cast<byte*>
+      (aligned_malloc(BLOCKS_PER_SLAB * srv_page_size, srv_page_size));
+    if (UNIV_UNLIKELY(!frames))
+      return false;
+
+    slab_t *slab= &slabs[n_slabs];
+    for (size_t i= 0; i < BLOCKS_PER_SLAB; ++i)
+    {
+      node_t *node= &slab->nodes[i];
+
+      /* .bss segment placement makes useless the buf_page_t ctor memset():
+        new (node->raw_block) buf_block_t();
+      Anyway, the only used memory portion of the block should be initialized
+      below. */
+
+      /* First node (!i) holds the base pointer of the allocated region */
+      node->get_block()->page.frame= frames + i * srv_page_size;
+      node->store_next_free(free);
+      free= node;
+    }
+
+    ++n_slabs;
+    return true;
+  }
+
+public:
+  /** Create the pool, initializing the mutex and the condition variable,
+  then eagerly allocate the first slab, retrying with a sleep in between
+  on aligned_malloc() failure. Abort on impossibility of allocating the
+  first slab.
+
+  Note: safe to call only after srv_page_size is set. */
+  void create() noexcept
+  {
+    mysql_mutex_init(PSI_NOT_INSTRUMENTED, &mutex, nullptr);
+    pthread_cond_init(&block_freed, nullptr);
+    ut_ad(srv_page_size >= UNIV_PAGE_SIZE_MIN &&
+          srv_page_size <= UNIV_PAGE_SIZE_MAX);
+    ut_ad(!n_slabs);
+    ut_ad(!free);
+    ut_ad(!n_active);
+    /* Try allocating the first slab, abort on failure after few retries */
+    size_t failures= 0;
+    while (UNIV_UNLIKELY(!add_slab<false>()))
+    {
+      if (!failures)
+        ib::warn() << "Could not allocate the first scratch pool slab, retrying...";
+      ++failures;
+      if (failures < 100)
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      else
+        ib::fatal() << "Cannot allocate the first scratch pool slab.";
+    }
+    ut_ad(n_slabs == 1);
+    ut_ad(free);
+  }
+
+  /** Close the pool, traversing the list of slabs and freeing each
+  slabs's block, frames and the slab itself. Finally condition
+  variable and mutex are destroyed.
+  No-op if create() was never called. */
+  void close() noexcept
+  {
+    if (UNIV_UNLIKELY(!n_slabs))
+    {
+      ut_ad(!free);
+      ut_ad(!n_active);
+      return;
+    }
+    ut_ad(n_slabs >= 1 && n_slabs <= MAX_SLABS);
+    ut_ad(free);
+    ut_ad(!n_active);
+    while (n_slabs)
+    {
+      --n_slabs;
+      slab_t *slab= &slabs[n_slabs];
+      ut_ad(slab->nodes[0].get_block()->page.frame);
+      aligned_free(slab->nodes[0].get_block()->page.frame);
+      ut_d(slab->nodes[0].get_block()->page.frame= nullptr);
+    }
+    ut_ad(!n_slabs);
+    free= nullptr;
+    pthread_cond_destroy(&block_freed);
+    mysql_mutex_destroy(&mutex);
+  }
+
+  /** Get a block from the free stack, protected by mutex.
+  If no free block is available, try allocating a new slab.
+  If no slab can be allocated (MAX_SLABS reached, or allocation
+  errors), then wait on the condition variable for a block
+  to be freed.
+  Known caveats on the block obtained here:
+  1- page lock is not initialized, hence it must not be used.
+  2- page state is not initialized, hence it must not be read.
+  3- modify clock is used for internal free-list linkage,
+      hence it must not be used.
+  @return a scratch block; never nullptr. */
+  buf_block_t *get() noexcept
+  {
+    mysql_mutex_lock(&mutex);
+    ut_ad(n_slabs >= 1);
+    while (UNIV_UNLIKELY(!free && !add_slab()))
+      my_cond_wait(&block_freed, &mutex.m_mutex);
+    ut_ad(free);
+    node_t *node= free;
+    free= node->get_next_free();
+    ut_d(++n_active);
+    mysql_mutex_unlock(&mutex);
+    buf_block_t* block= node->get_block();
+    block->page.set_os_used();
+    return block;
+  }
+
+  /** Return a block obtained from get(), protected by mutex.
+  Condition variable is signalled once the block is put in
+  the free stack.
+  @param block the block to be returned. */
+  void put(buf_block_t *block) noexcept
+  {
+    ut_ad(block);
+    node_t *node= reinterpret_cast<node_t*>(block);
+    ut_ad(reinterpret_cast<const char*>(&node->raw_block) ==
+          reinterpret_cast<const char*>(node));
+    node->get_block()->page.set_os_unused();
+    mysql_mutex_lock(&mutex);
+    node->store_next_free(free);
+    free= node;
+    ut_ad(free);
+    ut_ad(n_active > 0);
+    ut_d(--n_active);
+    pthread_cond_signal(&block_freed);
+    mysql_mutex_unlock(&mutex);
+  }
+};
+
+/** The scratch pool. */
+static btr_scratch_pool_t btr_scratch_pool;
+
+void btr_scratch_pool_init() noexcept { btr_scratch_pool.create(); }
+void btr_scratch_pool_close() noexcept { btr_scratch_pool.close(); }
+
+buf_block_t *btr_scratch_block_get() noexcept { return btr_scratch_pool.get(); }
+void btr_scratch_block_put(buf_block_t *block) noexcept
+{ btr_scratch_pool.put(block); }
+
 /** Reorganize an index page.
 @param cursor      index page cursor
 @param mtr         mini-transaction */
@@ -1312,7 +1578,7 @@ static dberr_t btr_page_reorganize_low(page_cur_t *cursor, mtr_t *mtr)
 
   btr_search_drop_page_hash_index(block, nullptr);
 
-  buf_block_t *old= buf_block_alloc();
+  buf_block_t *old= btr_scratch_block_get();
   /* Copy the old page to temporary space */
   memcpy_aligned<UNIV_PAGE_SIZE_MIN>(old->page.frame, block->page.frame,
                                      srv_page_size);
@@ -1336,7 +1602,10 @@ static dberr_t btr_page_reorganize_low(page_cur_t *cursor, mtr_t *mtr)
   mtr->set_log_mode(log_mode);
 
   if (UNIV_UNLIKELY(err != DB_SUCCESS))
+  {
+    btr_scratch_block_put(old);
     return err;
+  }
 
   /* Copy the PAGE_MAX_TRX_ID or PAGE_ROOT_AUTO_INC. */
   ut_ad(!page_get_max_trx_id(block->page.frame));
@@ -1372,6 +1641,7 @@ static dberr_t btr_page_reorganize_low(page_cur_t *cursor, mtr_t *mtr)
     sql_print_error("InnoDB: Page old data size %u new data size %u"
                     ", page old max ins size %zu new max ins size %zu",
                     data_size1, data_size2, max1, max2);
+    btr_scratch_block_put(old);
     return DB_CORRUPTION;
   }
 
@@ -1379,7 +1649,10 @@ static dberr_t btr_page_reorganize_low(page_cur_t *cursor, mtr_t *mtr)
   if (!pos)
     ut_ad(cursor->rec == page_get_infimum_rec(block->page.frame));
   else if (!(cursor->rec= page_rec_get_nth(block->page.frame, pos)))
+  {
+    btr_scratch_block_put(old);
     return DB_CORRUPTION;
+  }
 
   if (block->page.id().page_no() != cursor->index->page ||
       fil_page_get_type(old->page.frame) != FIL_PAGE_TYPE_INSTANT)
@@ -1550,7 +1823,7 @@ static dberr_t btr_page_reorganize_low(page_cur_t *cursor, mtr_t *mtr)
     }
   }
 
-  buf_block_free(old);
+  btr_scratch_block_put(old);
 
   MONITOR_INC(MONITOR_INDEX_REORG_ATTEMPTS);
   MONITOR_INC(MONITOR_INDEX_REORG_SUCCESSFUL);

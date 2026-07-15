@@ -2091,6 +2091,7 @@ void innodb_shutdown()
 	buf_dblwr.close();
 	lock_sys.close();
 	trx_pool_close();
+	btr_scratch_pool_close();
 
 	if (!srv_read_only_mode) {
 		mysql_mutex_destroy(&srv_monitor_file_mutex);

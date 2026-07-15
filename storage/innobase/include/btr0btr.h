@@ -87,6 +87,21 @@ bool btr_root_fseg_validate(ulint offset, const buf_block_t &block,
 @param index the index that is being accessed */
 ATTRIBUTE_COLD void btr_read_failed(dberr_t err, const dict_index_t &index);
 
+/** Create the pool of scratch blocks used by btr_page_reorganize_low()
+and page_zip_reorganize(). */
+void btr_scratch_pool_init() noexcept;
+/** Release the pool of scratch blocks used by btr_page_reorganize_low()
+and page_zip_reorganize(). */
+void btr_scratch_pool_close() noexcept;
+
+/** Obtain a scratch block for reorganizing a page. It is never linked
+into buf_pool.page_hash, buf_pool.LRU or buf_pool.free, and obtaining one
+never takes buf_pool.mutex.
+@return a scratch block; never nullptr */
+buf_block_t *btr_scratch_block_get() noexcept;
+/** Return a block obtained from btr_scratch_block_get(). */
+void btr_scratch_block_put(buf_block_t *block) noexcept;
+
 /** Get an index page and declare its latching order level.
 @param  index         index tree
 @param  page          page number

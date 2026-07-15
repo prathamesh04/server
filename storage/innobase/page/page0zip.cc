@@ -4397,8 +4397,8 @@ page_zip_reorganize(
 	/* Disable logging */
 	mtr_log_t	log_mode = mtr_set_log_mode(mtr, MTR_LOG_NONE);
 
-	temp_block = buf_block_alloc();
 	btr_search_drop_page_hash_index(block, nullptr);
+	temp_block = btr_scratch_block_get();
 	temp_page = temp_block->page.frame;
 
 	/* Copy the old page to temporary space */
@@ -4472,7 +4472,7 @@ page_zip_reorganize(
 		lock_move_reorganize_page(block, temp_block);
 	}
 
-	buf_block_free(temp_block);
+	btr_scratch_block_put(temp_block);
 	return err;
 }
 
