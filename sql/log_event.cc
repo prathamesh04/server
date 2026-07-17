@@ -2156,7 +2156,8 @@ Format_description_log_event(const uchar *buf, uint event_len,
 {
   DBUG_ENTER("Format_description_log_event::Format_description_log_event(char*,...)");
   used_checksum_alg= BINLOG_CHECKSUM_ALG_UNDEF;
-  if (event_len < LOG_EVENT_MINIMAL_HEADER_LEN + ST_COMMON_HEADER_LEN_OFFSET)
+  if (unlikely(
+      event_len < LOG_EVENT_MINIMAL_HEADER_LEN + ST_POST_HEADER_LEN_OFFSET))
   {
     server_version[0]= 0;
     DBUG_VOID_RETURN;
@@ -2169,18 +2170,19 @@ Format_description_log_event(const uchar *buf, uint event_len,
   created= uint4korr(buf+ST_CREATED_OFFSET);
   dont_set_created= 1;
 
-  if (server_version[0] == 0)
+  if (unlikely(server_version[0] == 0))
     DBUG_VOID_RETURN; /* sanity check */
-  if ((common_header_len=buf[ST_COMMON_HEADER_LEN_OFFSET]) < LOG_EVENT_MINIMAL_HEADER_LEN)
+  common_header_len= buf[ST_COMMON_HEADER_LEN_OFFSET];
+  if (unlikely(common_header_len < LOG_EVENT_MINIMAL_HEADER_LEN))
     DBUG_VOID_RETURN; /* sanity check */
   number_of_event_types=
-    event_len - (LOG_EVENT_MINIMAL_HEADER_LEN + ST_COMMON_HEADER_LEN_OFFSET + 1);
+    event_len - (LOG_EVENT_MINIMAL_HEADER_LEN + ST_POST_HEADER_LEN_OFFSET);
   DBUG_PRINT("info", ("common_header_len=%d number_of_event_types=%d",
                       common_header_len, number_of_event_types));
   /* If alloc fails, we'll detect it in is_valid() */
 
   post_header_len= (uint8*) my_memdup(PSI_INSTRUMENT_ME,
-                                      buf+ST_COMMON_HEADER_LEN_OFFSET+1,
+                                      buf + ST_POST_HEADER_LEN_OFFSET,
                                       number_of_event_types*
                                       sizeof(*post_header_len),
                                       MYF(0));
