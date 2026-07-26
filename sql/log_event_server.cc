@@ -2373,10 +2373,10 @@ bool Format_description_log_event::write()
     my_b_safe_write().
   */
   uchar buff[ST_POST_HEADER_LEN_OFFSET];
-  const size_t buff_size= DBUG_EVALUATE_IF("truncate_fde_at_common_header_len",
+  const size_t buff_size= DBUG_EVALUATE_IF("truncate_fde_common_header_len",
     ST_COMMON_HEADER_LEN_OFFSET, sizeof(buff));
   size_t rec_size= buff_size +
-    DBUG_EVALUATE_IF("truncate_fde_at_common_header_len", 0,
+    DBUG_EVALUATE_IF("truncate_fde_at_post_header_len", 0,
       BINLOG_CHECKSUM_ALG_DESC_LEN + number_of_event_types);
   int2store(buff + ST_BINLOG_VER_OFFSET,binlog_version);
   memcpy((char*) buff + ST_SERVER_VER_OFFSET,server_version,ST_SERVER_VER_LEN);
@@ -2417,7 +2417,7 @@ bool Format_description_log_event::write()
   }
   ret= write_header(rec_size) ||
     write_data(buff, buff_size) ||
-    DBUG_EVALUATE_IF("truncate_fde_at_common_header_len", false,
+    DBUG_EVALUATE_IF("truncate_fde_at_post_header_len", false,
        write_data(post_header_len, number_of_event_types) ||
        write_data(&checksum_byte, sizeof(checksum_byte)) ||
        write_footer());
