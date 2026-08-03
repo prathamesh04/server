@@ -219,6 +219,7 @@ typedef struct st_heap_info
   my_bool implicit_emptied;
   my_bool has_zerocopy_blobs;  /* Last hp_read_blobs produced zero-copy ptrs */
   my_bool has_pending_blob_free; /* pending_blob_chains awaits freeing */
+  my_bool lock_granted;         /* thr_lock() gave `lock' to this handle */
   THR_LOCK_DATA lock;
   LIST open_list;
 } HP_INFO;

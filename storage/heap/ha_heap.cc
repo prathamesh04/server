@@ -499,6 +499,30 @@ int ha_heap::extra(enum ha_extra_function operation)
 
 int ha_heap::reset()
 {
+  /*
+    heap_reset() redeems the blob chains parked by a deferred free, which puts
+    records back on the shared free list.  That is a write to HP_SHARE, so it
+    needs the THR_LOCK -- unless no other connection can reach the share at
+    all, which is the case for a TEMPORARY table.
+
+    Only heap_delete() and heap_update() park, and only for a table that is
+    not internal, an internal one being never binlogged and so free to drop
+    its chains outright.  `internal' is HA_OPEN_INTERNAL_TABLE, the
+    optimizer's own temporary table, which is not the set the server locks:
+    get_lock_data() leaves every non-transactional TEMPORARY table out of the
+    lock set (sql/lock.cc), so a user TEMPORARY table parks its chains while
+    holding nothing.  It owns them alone -- no other connection can reach the
+    share -- and this call, reached from mark_tmp_table_as_free_for_reuse() at
+    the end of every statement, is what redeems them.
+
+    Every other table does hold the lock while it parks, and keeps holding it
+    until the chains are back: external_lock(F_UNLCK) redeems them for an
+    ordinary statement, and this call does for a statement under LOCK TABLES,
+    reached from mark_used_tables_as_free_for_reuse() with the lock still
+    held.  By the time close_thread_table() gets here there is nothing left.
+  */
+  DBUG_ASSERT(!file->has_pending_blob_free || hp_lock_is_held(file) ||
+              table->s->tmp_table != NO_TMP_TABLE);
   return heap_reset(file);
 }
 
@@ -528,21 +552,26 @@ int ha_heap::reset_auto_increment(ulonglong value)
 int ha_heap::external_lock(THD *thd, int lock_type)
 {
 #if !defined(DBUG_OFF) && defined(EXTRA_HEAP_DEBUG)
-  /*
-    A table already marked crashed is knowingly inconsistent; every data
-    access on it fails with HA_ERR_CRASHED, so re-detecting the damage
-    here would only raise a second error into a diagnostics area that
-    can already be OK (e.g. after UNLOCK TABLES) and fire the
-    Diagnostics_area assertion.
-  */
-  if (lock_type == F_UNLCK && file->s->changed &&
-      !heap_is_crashed(file->s) && heap_check_heap(file, 0))
+  /* See hp_may_check_heap_on_unlock() for when this is safe to run at all */
+  if (lock_type == F_UNLCK && hp_may_check_heap_on_unlock(file) &&
+      heap_check_heap(file, 0))
     return HA_ERR_CRASHED;
 #endif
   if (lock_type != F_UNLCK && heap_is_crashed(file->s))
     return HA_ERR_CRASHED;
 
-  if (lock_type == F_UNLCK)
+  if (lock_type != F_UNLCK)
+    hp_lock_request_begin(file);
+
+  /*
+    Redeeming the parked chains puts records back on the shared free list, so
+    it needs the THR_LOCK just as much as the verification above -- see
+    hp_test_concurrent-t.c, which reproduces the del_link corruption that
+    flushing without it causes.  Deferring costs nothing: the chains stay
+    parked, and heap_write() on this handle, the next unlock that does hold
+    the lock, or heap_reset() at the end of the statement redeems them.
+  */
+  if (lock_type == F_UNLCK && hp_lock_is_held(file))
     hp_flush_pending_blob_free(file);
   return 0;					// No external locking
 }

@@ -392,6 +392,72 @@ static inline void hp_flush_pending_blob_free(HP_INFO *info)
 }
 
 /*
+  A new lock request begins for this handle.
+
+  Called from ha_heap::external_lock() when the table is externally locked,
+  which the SQL layer always does just before it tries to take the THR_LOCK.
+  Any grant recorded so far belongs to a request that is over.
+*/
+
+static inline void hp_lock_request_begin(HP_INFO *info)
+{
+  info->lock_granted= 0;
+}
+
+/*
+  Does this handle hold its table's THR_LOCK?
+
+  ha_heap::external_lock() is reached with F_UNLCK on three paths that look
+  identical to the handler.  Only the first of them still holds the lock:
+
+    - mysql_unlock_tables() calls unlock_external() before thr_multi_unlock();
+    - mysql_lock_tables() calls unlock_external() to balance the external
+      locks it already took, because thr_multi_lock() failed;
+    - lock_external() unwinds the tables it has already locked, because a
+      later table refused -- all before thr_multi_lock() runs at all.
+      ha_partition::external_lock() unwinds its partitions the same way.
+
+  The requested lock type cannot tell them apart on its own, because
+  ha_heap::store_lock() records it at get_lock_data() time, before anything is
+  locked: on the last path it is set while nothing is held.  Only an actual
+  grant can, which is what hp_lock_granted() records.  The type is still
+  needed as well, for the lock thr_multi_lock() takes and then rolls back when
+  a later table times out: thr_unlock() resets the type but cannot reach the
+  flag.
+
+  A HEAP table has no row-level concurrency control: everything shared through
+  HP_SHARE is protected by the THR_LOCK alone.  Anything that reads or writes
+  the share therefore has to ask this first.
+*/
+
+static inline my_bool hp_lock_is_held(const HP_INFO *info)
+{
+  return info->lock_granted && info->lock.type != TL_UNLOCK;
+}
+
+/*
+  May ha_heap::external_lock(F_UNLCK) verify the table with heap_check_heap()?
+
+  A scan taken outside the THR_LOCK sees a writer's intermediate state:
+  hp_alloc_from_tail() publishes total_records at allocation time, before the
+  slot is written.  The scan then either counts a slot the writer has not
+  filled in yet or races the counters it compares against, and reports damage
+  that is not there.  Since heap_check_heap() marks the share crashed, that
+  false positive poisons a healthy table for every connection using it.
+
+  A table already marked crashed is knowingly inconsistent; every data access
+  on it fails with HA_ERR_CRASHED, so re-detecting the damage here would only
+  raise a second error into a diagnostics area that can already be OK (e.g.
+  after UNLOCK TABLES) and fire the Diagnostics_area assertion.
+*/
+
+static inline my_bool hp_may_check_heap_on_unlock(const HP_INFO *info)
+{
+  return (hp_lock_is_held(info) && info->s->changed &&
+          !heap_is_crashed(info->s));
+}
+
+/*
   Does a record's blob data live in `chain`?
 
   hp_read_blobs() hands out zero-copy pointers of exactly two forms: the chain

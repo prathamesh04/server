@@ -23,6 +23,23 @@ static void init_block(HP_BLOCK *block, size_t reclength, ulong min_records,
 
 
 /*
+  THR_LOCK grant callback.
+
+  The only thing HEAP wants from it is the fact that it was called: a handle
+  may not touch HP_SHARE until thr_lock() has actually given it the lock, and
+  the requested lock type says nothing about that (see hp_lock_is_held()).
+  Never fails, so a grant is never turned into THR_LOCK_ABORTED.
+*/
+
+static my_bool hp_lock_granted(void *param,
+                               my_bool concurrent_insert __attribute__((unused)))
+{
+  ((HP_INFO*) param)->lock_granted= 1;
+  return 0;
+}
+
+
+/*
   In how many parts are we going to do allocations of memory and indexes
   If we assign 1M to the heap table memory, we will allocate roughly
   (1M/16) bytes per allocation
@@ -305,6 +322,7 @@ int heap_create(const char *name, HP_CREATE_INFO *create_info,
     if (!create_info->internal_table)
     {
       thr_lock_init(&share->lock);
+      share->lock.get_status= hp_lock_granted;
       share->open_list.data= (void*) share;
       heap_share_list= list_add(heap_share_list,&share->open_list);
     }

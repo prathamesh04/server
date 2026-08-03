@@ -39,7 +39,7 @@ HP_INFO *heap_open_from_share(HP_SHARE *share, int mode)
     DBUG_RETURN(0);
   }
   share->open_count++; 
-  thr_lock_data_init(&share->lock,&info->lock,NULL);
+  thr_lock_data_init(&share->lock,&info->lock,info);
   info->s= share;
   info->lastkey= (uchar*) (info + 1);
   info->recbuf= (uchar*) (info->lastkey + share->max_key_length);
