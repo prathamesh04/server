@@ -229,4 +229,94 @@ disconnect ddl;
 CHECK TABLE t2;
 DROP TABLE t1,t2;
 
+--echo #
+--echo # MDEV-37467 InnoDB Instant ALTER TABLE is not crash safe
+--echo #
+# These are from include/shutdown_mysqld.inc and allow to call start_mysqld.inc
+--let $_expect_file_name= `select regexp_replace(@@tmpdir, '^.*/','')`
+--let $_expect_file_name= $MYSQLTEST_VARDIR/tmp/$_expect_file_name.expect
+
+CREATE TABLE t1(a INT PRIMARY KEY, b INT, c INT) ENGINE=InnoDB;
+INSERT INTO t1 VALUES(1,2,3),(4,5,6);
+
+# Crash after writing the metadata BLOB, before inserting the
+# metadata record.
+--error 2013
+SET STATEMENT DEBUG_DBUG='d,btr_store_metadata_crash' FOR
+ALTER TABLE t1 DROP COLUMN c, ALGORITHM=INSTANT;
+--source include/start_mysqld.inc
+CHECK TABLE t1;
+SELECT * FROM t1;
+
+ALTER TABLE t1 DROP COLUMN c, ALGORITHM=INSTANT;
+SELECT * FROM t1;
+ALTER TABLE t1 ADD COLUMN d INT NOT NULL DEFAULT 7, ALGORITHM=INSTANT;
+SELECT * FROM t1;
+
+# Crash after writing the metadata BLOB, before updating the
+# existing metadata record.
+--error 2013
+SET STATEMENT DEBUG_DBUG='d,btr_store_metadata_crash' FOR
+ALTER TABLE t1 DROP COLUMN b, ALGORITHM=INSTANT;
+--source include/start_mysqld.inc
+
+CHECK TABLE t1;
+SELECT * FROM t1;
+ALTER TABLE t1 DROP COLUMN b, ALGORITHM=INSTANT;
+SELECT * FROM t1;
+CHECK TABLE t1;
+
+DROP TABLE t1;
+
+# Test: Table full during Simple ALTER DROP
+CREATE TABLE t1(
+  id INT PRIMARY KEY,
+  c1 INT,
+  c2 VARCHAR(100),
+  c3 TEXT) ENGINE=InnoDB;
+INSERT INTO t1 VALUES(1, 100, 'test1', 'data1');
+INSERT INTO t1 VALUES(2, 200, 'test2', 'data2');
+
+--error ER_RECORD_FILE_FULL
+SET STATEMENT DEBUG_DBUG='d,btr_page_alloc_fail' FOR
+ALTER TABLE t1 DROP COLUMN c2, ALGORITHM=INSTANT;
+INSERT INTO t1 VALUES(3, 300, 'test3', 'data3');
+SELECT * FROM t1;
+
+# Test: Table full during ALTER DROP done after ALTER ADD
+CREATE TABLE t2(id INT PRIMARY KEY, c1 INT) ENGINE=InnoDB;
+INSERT INTO t2 VALUES(1, 100);
+INSERT INTO t2 VALUES(2, 200);
+
+ALTER TABLE t2 ADD COLUMN c2 VARCHAR(100) DEFAULT 'default_value', ALGORITHM=INSTANT;
+INSERT INTO t2 VALUES(3, 300, 'custom');
+SELECT * FROM t2;
+
+--error ER_RECORD_FILE_FULL
+SET STATEMENT DEBUG_DBUG='d,btr_page_alloc_fail' FOR
+ALTER TABLE t2 DROP COLUMN c2, ALGORITHM=INSTANT;
+INSERT INTO t2 VALUES(4, 400, 'custom');
+SELECT * FROM t2;
+
+# Test: Table full during ALTER DROP ADD BLOB with 50kb default value while allocating 4th page
+CREATE TABLE t3(
+  id INT PRIMARY KEY,
+  c1 INT,
+  c2 VARCHAR(100)) ENGINE=InnoDB;
+INSERT INTO t3 VALUES(1, 100, 'test1');
+INSERT INTO t3 VALUES(2, 200, 'test2');
+
+--error ER_RECORD_FILE_FULL
+SET STATEMENT DEBUG_DBUG='d,btr_page_alloc_fail_4' FOR
+ALTER TABLE t3 DROP COLUMN c2, ADD COLUMN c3 BLOB DEFAULT (REPEAT(0x41, 50000)), ALGORITHM=INSTANT;
+INSERT INTO t3 VALUES(3, 300, 'test3');
+SELECT * FROM t3;
+
+--source include/restart_mysqld.inc
+SELECT * FROM t1;
+SELECT * FROM t2;
+SELECT * FROM t3;
+DROP TABLE t1;
+DROP TABLE t2;
+DROP TABLE t3;
 --list_files $MYSQLD_DATADIR/test
