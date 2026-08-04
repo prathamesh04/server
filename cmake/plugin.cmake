@@ -17,7 +17,7 @@
 
 INCLUDE(CMakeParseArguments)
 
-# MYSQL_ADD_PLUGIN(plugin_name source1...sourceN
+# MARIADB_ADD_PLUGIN(plugin_name source1...sourceN
 # [STORAGE_ENGINE]
 # [STATIC_ONLY|MODULE_ONLY]
 # [MANDATORY|DEFAULT]
@@ -32,7 +32,7 @@ INCLUDE(CMakeParseArguments)
 # [LINK_LIBRARIES lib1...libN]
 # [DEPENDS target1...targetN]
 
-MACRO(MYSQL_ADD_PLUGIN)
+MACRO(MARIADB_ADD_PLUGIN)
   CMAKE_PARSE_ARGUMENTS(ARG
     "STORAGE_ENGINE;STATIC_ONLY;MODULE_ONLY;MANDATORY;DEFAULT;DISABLED;NOT_EMBEDDED;RECOMPILE_FOR_EMBEDDED;CLIENT"
     "MODULE_OUTPUT_NAME;STATIC_OUTPUT_NAME;COMPONENT;CONFIG;VERSION"
@@ -326,20 +326,12 @@ MACRO(MYSQL_ADD_PLUGIN)
 ENDMACRO()
 
 
-# Add all CMake projects under storage  and plugin 
-# subdirectories, configure sql_builtins.cc
-MACRO(CONFIGURE_PLUGINS)
-  IF(NOT WITHOUT_SERVER)
-    FILE(GLOB dirs_storage ${CMAKE_SOURCE_DIR}/storage/*)
-  ENDIF()
+MACRO(MYSQL_ADD_PLUGIN)
+  MARIADB_ADD_PLUGIN(${ARGV})
+ENDMACRO()
 
-  FILE(GLOB dirs_plugin ${CMAKE_SOURCE_DIR}/plugin/*)
-  FOREACH(dir ${dirs_storage} ${dirs_plugin})
-    IF (EXISTS ${dir}/CMakeLists.txt)
-      ADD_SUBDIRECTORY(${dir})
-    ENDIF()
-  ENDFOREACH()
-
+# verify that all -DPLUGIN_xxx=YES plugins are being built
+MACRO(VERIFY_PLUGINS)
   GET_CMAKE_PROPERTY(ALL_VARS VARIABLES)
   FOREACH (V ${ALL_VARS})
     IF (V MATCHES "^PLUGIN_")

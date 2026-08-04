@@ -256,4 +256,10 @@ IF(UNIX AND NOT WITHOUT_SERVER)
                    WORKING_DIRECTORY \$ENV{DESTDIR}${prefix})"
                    COMPONENT SupportFiles)
   ENDIF(INSTALL_SYSCONFDIR)
+
+  FILE(READ ${CMAKE_SOURCE_DIR}/cmake/install_layout.cmake install_layout.cmake)
+  FILE(READ ${CMAKE_SOURCE_DIR}/cmake/plugin.cmake plugin.cmake)
+  CONFIGURE_FILE(mariadb-plugin-config.cmake.in mariadb-plugin-config.cmake @ONLY)
+  INSTALL(FILES mariadb-plugin-config.cmake DESTINATION ${INSTALL_SHAREDIR}/cmake/mariadb-plugin/
+          COMPONENT Development)
 ENDIF()
